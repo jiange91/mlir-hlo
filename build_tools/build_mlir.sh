@@ -36,10 +36,12 @@ mkdir -p "$build_dir"
 echo "Beginning build (commands will echo)"
 set -x
 
+
 cmake -GNinja \
   "-H$LLVM_SRC_DIR/llvm" \
   "-B$build_dir" \
-  -DLLVM_INSTALL_UTILS=ON \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++ \
   -DLLVM_ENABLE_LLD=ON \
   -DLLVM_ENABLE_PROJECTS=mlir \
   -DLLVM_TARGETS_TO_BUILD="X86;NVPTX;AMDGPU" \
