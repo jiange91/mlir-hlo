@@ -20,6 +20,7 @@ limitations under the License.
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Quant/QuantTypes.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/Attributes.h"
@@ -31,10 +32,11 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/dialect/Version.h"
 #include "stablehlo/dialect/VhloOps.h"
+#include "stablehlo/dialect/VhloTypes.h"
 #include "stablehlo/transforms/Passes.h"
-#include "stablehlo/transforms/TypeConversion.h"
 
 #define DEBUG_TYPE "compat-passes"
 
@@ -57,9 +59,8 @@ class VhloToVersionConverter : public TypeConverter {
   VhloToVersionConverter() : TypeConverter() {
     addConversion([](Type type) -> Type {
       if (type.getDialect().getNamespace() ==
-          vhlo::VhloDialect::getDialectNamespace()) {
+          vhlo::VhloDialect::getDialectNamespace())
         return type;
-      }
       LLVM_DEBUG(llvm::dbgs() << "Invalid type: " << type << '\n');
       return {};
     });
@@ -67,9 +68,7 @@ class VhloToVersionConverter : public TypeConverter {
 };
 
 FailureOr<Version> parseTargetVersion(llvm::StringRef versionRef) {
-  if (versionRef == "current") {
-    return Version::getCurrentVersion();
-  }
+  if (versionRef == "current") return Version::getCurrentVersion();
   return Version::fromString(versionRef);
 }
 
@@ -78,28 +77,26 @@ FailureOr<Version> validateTargetVersion(llvm::StringRef versionRef,
                                          Operation* op) {
   auto failOrVersion = parseTargetVersion(versionRef);
   if (failed(failOrVersion)) {
-    if (versionRef.empty()) {
+    if (versionRef.empty())
       return emitError(op->getLoc())
              << "No target version specified. Specify target using: "
                 "--vhlo-to-version='target=[targetVersion]'\n"
              << "Target version must be of the form #.#.# or 'current'.";
-    }
     return emitError(op->getLoc())
            << "Invalid target version argument '" << versionRef << "'\n"
            << "Target version must be of the form #.#.# or 'current'.";
   }
 
   Version targetVersion = *failOrVersion;
-  if (targetVersion < Version::getMinimumVersion()) {
+  if (targetVersion < Version::getMinimumVersion())
     return emitError(op->getLoc()) << "target version " << targetVersion
                                    << " is less than minimum supported "
                                    << Version::getMinimumVersion();
-  }
-  if (Version::getCurrentVersion() < targetVersion) {
+  if (Version::getCurrentVersion() < targetVersion)
     return emitError(op->getLoc()) << "target version " << targetVersion
                                    << " is greater than current version "
                                    << Version::getCurrentVersion();
-  }
+
   return targetVersion;
 }
 
@@ -121,23 +118,27 @@ LogicalResult isLegalAttribute(const Attribute& attr, Version targetVersion) {
   }
 
   // Recursively check attrs if VHLO attr is a container
-  if (auto arrAttr = attr.dyn_cast<ArrayV1Attr>()) {
+  if (auto arrAttr = attr.dyn_cast<ArrayV1Attr>())
     return success(llvm::all_of(arrAttr.getValue(), [&](Attribute ele) {
       return succeeded(isLegalAttribute(ele, targetVersion));
     }));
-  }
-  if (auto elementsAttr = attr.dyn_cast<DenseIntOrFPElementsV1Attr>()) {
+  if (auto elementsAttr = attr.dyn_cast<DenseIntOrFPElementsV1Attr>())
     return isLegalType(elementsAttr.getType(), targetVersion);
+  if (auto arrAttr = attr.dyn_cast<DictionaryV1Attr>()) {
+    return success(llvm::all_of(
+        arrAttr.getValue(), [&](std::pair<Attribute, Attribute> entry) {
+          return succeeded(isLegalAttribute(entry.first, targetVersion)) &&
+                 succeeded(isLegalAttribute(entry.second, targetVersion));
+        }));
   }
-  if (auto flatSymAttr = attr.dyn_cast<FlatSymbolRefV1Attr>()) {
+  if (auto flatSymAttr = attr.dyn_cast<FlatSymbolRefV1Attr>())
     return isLegalAttribute(flatSymAttr.getRootReference(), targetVersion);
-  }
-  if (auto floatAttr = attr.dyn_cast<FloatV1Attr>()) {
+  if (auto floatAttr = attr.dyn_cast<FloatV1Attr>())
     return isLegalType(floatAttr.getType(), targetVersion);
-  }
-  if (auto intAttr = attr.dyn_cast<IntegerV1Attr>()) {
+  if (auto intAttr = attr.dyn_cast<IntegerV1Attr>())
     return isLegalType(intAttr.getType(), targetVersion);
-  }
+  if (auto typeAttr = attr.dyn_cast<TypeV1Attr>())
+    return isLegalType(typeAttr.getValue(), targetVersion);
 
   // Is VHLO and valid version, success.
   return success();
@@ -153,8 +154,14 @@ LogicalResult isLegalType(Type type, const Version& targetVersion) {
   }
 
   // Recursively check types if VHLO type is a container.
-  if (auto complex = type.dyn_cast<ComplexV1Type>()) {
+  if (auto complex = type.dyn_cast<ComplexV1Type>())
     return isLegalType(complex.getElementType(), targetVersion);
+  if (auto func = type.dyn_cast<FunctionV1Type>()) {
+    auto validateType = [&](Type ele) {
+      return succeeded(isLegalType(ele, targetVersion));
+    };
+    return success(llvm::all_of(func.getInputs(), validateType) &&
+                   llvm::all_of(func.getResults(), validateType));
   }
   if (auto ranked = type.dyn_cast<RankedTensorV1Type>()) {
     auto encoding = ranked.getEncoding();
@@ -162,19 +169,16 @@ LogicalResult isLegalType(Type type, const Version& targetVersion) {
       return failure();
     return isLegalType(ranked.getElementType(), targetVersion);
   }
-  if (auto tuple = type.dyn_cast<TupleV1Type>()) {
+  if (auto tuple = type.dyn_cast<TupleV1Type>())
     return success(llvm::all_of(tuple.getTypes(), [&](Type ele) {
       return succeeded(isLegalType(ele, targetVersion));
     }));
-  }
-  if (auto quant = type.dyn_cast<UniformQuantizedV1Type>()) {
+  if (auto quant = type.dyn_cast<UniformQuantizedV1Type>())
     return success(
         succeeded(isLegalType(quant.getStorageType(), targetVersion)) &&
         succeeded(isLegalType(quant.getExpressedType(), targetVersion)));
-  }
-  if (auto unranked = type.dyn_cast<UnrankedTensorV1Type>()) {
+  if (auto unranked = type.dyn_cast<UnrankedTensorV1Type>())
     return isLegalType(unranked.getElementType(), targetVersion);
-  }
 
   // Is VHLO and valid version, success.
   return success();
@@ -198,10 +202,8 @@ bool isLegalOperation(Operation* op, const Version& targetVersion) {
     return succeeded(isLegalType(t, targetVersion));
   };
   if (!llvm::all_of(op->getOperandTypes(), isLegalTypeFn) ||
-      !llvm::all_of(op->getResultTypes(), isLegalTypeFn)) {
+      !llvm::all_of(op->getResultTypes(), isLegalTypeFn))
     return false;
-  }
-
   return true;
 }
 
@@ -218,9 +220,7 @@ struct VhloToVersionPass : public VhloToVersionPassBase<VhloToVersionPass> {
     // Validate version number
     auto failOrVersion =
         validateTargetVersion(targetVersionOption, getOperation());
-    if (failed(failOrVersion)) {
-      return signalPassFailure();
-    }
+    if (failed(failOrVersion)) return signalPassFailure();
     Version targetVersion = *failOrVersion;
 
     // An op is legal if the target version is in the ops `[min, max]`
@@ -245,18 +245,17 @@ struct VhloToVersionPass : public VhloToVersionPassBase<VhloToVersionPass> {
         [&targetVersion](Operation* op) {
           return isLegalOperation(op, targetVersion);
         });
+    target.addIllegalDialect<stablehlo::StablehloDialect, func::FuncDialect>();
 
     vhlo::VhloToVersionConverter converter;
     RewritePatternSet patterns(&getContext());
     stablehlo::populateVhloToVersionPatterns(&patterns, &converter,
                                              &getContext());
-    registerFuncOpsForTypeConversion(target, patterns, converter);
 
     // Conversions within VHLO may fail if new features or ops are used.
     if (failed(applyPartialConversion(getOperation(), target,
-                                      std::move(patterns)))) {
+                                      std::move(patterns))))
       return signalPassFailure();
-    }
   }
 };
 
@@ -281,15 +280,12 @@ struct VersionConversionPattern : OpConversionPattern<SourceOp> {
   LogicalResult matchAndRewrite(
       SourceOp op, typename SourceOp::Adaptor /*adaptor*/,
       ConversionPatternRewriter& rewriter) const override {
-    if (failed(prepareOpForConversion(op))) {
-      return failure();
-    }
+    if (failed(prepareOpForConversion(op))) return failure();
     auto newOp = rewriter.replaceOpWithNewOp<TargetOp>(
         op, op->getResultTypes(), op->getOperands(), op->getAttrs());
     for (auto [oldRegion, newRegion] :
-         llvm::zip(op->getRegions(), newOp->getRegions())) {
+         llvm::zip(op->getRegions(), newOp->getRegions()))
       rewriter.inlineRegionBefore(oldRegion, newRegion, newRegion.end());
-    }
     return success();
   }
 };
@@ -315,10 +311,9 @@ struct CustomCallOpV2ToV1
     if (op.getOutputOperandAliases()) {
       auto aliases =
           op.getOutputOperandAliases().value().dyn_cast<vhlo::ArrayV1Attr>();
-      if (!aliases || !aliases.getValue().empty()) {
+      if (!aliases || !aliases.getValue().empty())
         return emitDowngradeError(
             op, "op has a non-empty output_operand_aliases attribute");
-      }
       // Safe to downgrade.
       op->removeAttr("output_operand_aliases");
     }
@@ -342,10 +337,9 @@ struct CollectivePermuteOpV2ToV1
                                       CollectivePermuteOpV1> {
   using VersionConversionPattern::VersionConversionPattern;
   LogicalResult prepareOpForConversion(CollectivePermuteOpV2 op) const final {
-    if (op.getChannelHandle().has_value()) {
+    if (op.getChannelHandle().has_value())
       return emitDowngradeError(op,
                                 "op has a non-empty channel_handle attribute");
-    }
     return success();
   }
 };
@@ -364,10 +358,9 @@ struct AllGatherOpV2ToV1
     : public VersionConversionPattern<AllGatherOpV2, AllGatherOpV1> {
   using VersionConversionPattern::VersionConversionPattern;
   LogicalResult prepareOpForConversion(AllGatherOpV2 op) const final {
-    if (op.getUseGlobalDeviceIdsAttr()) {
+    if (op.getUseGlobalDeviceIdsAttr())
       return emitDowngradeError(
           op, "op has a non-empty use_global_device_ids attribute");
-    }
     return success();
   }
 };
@@ -386,10 +379,9 @@ struct AllToAllOpV2ToV1
     : public VersionConversionPattern<AllToAllOpV2, AllToAllOpV1> {
   using VersionConversionPattern::VersionConversionPattern;
   LogicalResult prepareOpForConversion(AllToAllOpV2 op) const final {
-    if (op.getChannelHandle().has_value()) {
+    if (op.getChannelHandle().has_value())
       return emitDowngradeError(op,
                                 "op has a non-empty channel_handle attribute");
-    }
     return success();
   }
 };

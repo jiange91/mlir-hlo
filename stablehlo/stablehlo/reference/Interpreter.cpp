@@ -59,9 +59,8 @@ llvm::Expected<SmallVector<Tensor>> eval(func::FuncOp func,
     auto populateResults = [&](ArrayRef<Tensor> runtimeValues) {
       assert(op.getNumResults() == runtimeValues.size());
       for (auto [ssaResult, runtimeResult] :
-           llvm::zip(op.getResults(), runtimeValues)) {
+           llvm::zip(op.getResults(), runtimeValues))
         stackFrame[ssaResult] = runtimeResult;
-      }
     };
 
     if (auto addOp = dyn_cast<AddOp>(op)) {
@@ -141,6 +140,14 @@ llvm::Expected<SmallVector<Tensor>> eval(func::FuncOp func,
     } else if (auto sineOp = dyn_cast<SineOp>(op)) {
       Tensor runtimeOperand = fetchOperand(sineOp.getOperand());
       Tensor runtimeResult = evalSineOp(runtimeOperand, sineOp.getType());
+      populateResults({runtimeResult});
+    } else if (auto sliceOp = dyn_cast<SliceOp>(op)) {
+      Tensor runtimeOperand = fetchOperand(sliceOp.getOperand());
+      auto startIndices =
+          llvm::to_vector(sliceOp.getStartIndices().getValues<int64_t>());
+      auto strides = llvm::to_vector(sliceOp.getStrides().getValues<int64_t>());
+      Tensor runtimeResult =
+          evalSliceOp(runtimeOperand, startIndices, strides, sliceOp.getType());
       populateResults({runtimeResult});
     } else if (auto subtractOp = dyn_cast<SubtractOp>(op)) {
       Tensor runtimeLhs = fetchOperand(subtractOp.getLhs());
