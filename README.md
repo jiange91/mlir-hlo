@@ -49,7 +49,9 @@ Finally you can build and test this repository:
        -DLLVM_ENABLE_LLD=ON \
        -DCMAKE_BUILD_TYPE=Release \
        -DLLVM_ENABLE_ASSERTIONS=On \
-       -DMLIR_DIR=${PWD}/../llvm-build/lib/cmake/mlir
+       -DMLIR_DIR=${PWD}/../llvm-build/lib/cmake/mlir \
+       -DCMAKE_C_COMPILER=clang \
+       -DCMAKE_CXX_COMPILER=clang++
     $ ninja check-mlir-hlo
 
 
